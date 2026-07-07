@@ -1,0 +1,72 @@
+import { Response } from "express";
+import Message from "../models/Message.js";
+import Notification from "../models/Notification.js";
+import { AuthRequest } from "../middleware/auth.middleware.js";
+
+function conversationIdFor(matchId: string) {
+  return `match_${matchId}`;
+}
+
+export const getConversation = async (req: AuthRequest, res: Response) => {
+  try {
+    const matchId = String(req.params.matchId);
+    const conversationId = conversationIdFor(matchId);
+    const messages = await Message.find({ conversationId }).sort({ createdAt: 1 });
+    res.status(200).json({ success: true, data: messages });
+  } catch (err) {
+    res.status(500).json({ success: false, message: (err as Error).message });
+  }
+};
+
+export const sendMessage = async (req: AuthRequest, res: Response) => {
+  try {
+    const { matchId, recipient, text } = req.body;
+    if (!text || !recipient) {
+      return res.status(400).json({ success: false, message: "recipient and text are required" });
+    }
+
+    const conversationId = conversationIdFor(matchId);
+    const message = await Message.create({
+      conversationId,
+      sender: req.user!.id,
+      recipient,
+      matchId,
+      text,
+    });
+
+    await Notification.create({
+      user: recipient,
+      type: "message",
+      title: "New message",
+      body: text.slice(0, 80),
+      link: `/chat/${matchId}`,
+    });
+
+    // If a socket.io instance is attached to the app, emit in real-time too.
+    const io = req.app.get("io");
+    if (io) io.to(conversationId).emit("message:new", message);
+
+    res.status(201).json({ success: true, data: message });
+  } catch (err) {
+    res.status(500).json({ success: false, message: (err as Error).message });
+  }
+};
+
+export const myConversations = async (req: AuthRequest, res: Response) => {
+  try {
+    const messages = await Message.find({
+      $or: [{ sender: req.user!.id }, { recipient: req.user!.id }],
+    }).sort({ createdAt: -1 });
+
+    const seen = new Set<string>();
+    const conversations = [];
+    for (const m of messages) {
+      if (seen.has(m.conversationId)) continue;
+      seen.add(m.conversationId);
+      conversations.push(m);
+    }
+    res.status(200).json({ success: true, data: conversations });
+  } catch (err) {
+    res.status(500).json({ success: false, message: (err as Error).message });
+  }
+};
